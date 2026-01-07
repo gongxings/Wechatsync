@@ -1,0 +1,137 @@
+{
+  "manifest_version": 3,
+  "name": "文章同步助手",
+  "description": "一键同步文章到知乎、头条、掘金等 20+ 平台，支持 WordPress 等自建站",
+  "version": "2.0.0",
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "action": {
+    "default_icon": "assets/icon-48.png",
+    "default_popup": "src/popup/index.html"
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "cookies",
+    "notifications",
+    "offscreen",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "scripting",
+    "tabs",
+    "alarms",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://mp.weixin.qq.com/s/*", "https://mp.weixin.qq.com/s?*"],
+      "js": ["src/content/weixin.ts"],
+      "run_at": "document_end"
+    },
+    {
+      "matches": ["https://mp.weixin.qq.com/cgi-bin/appmsg*"],
+      "js": ["src/content/weixin-editor.ts"],
+      "run_at": "document_end"
+    },
+    {
+      "matches": ["https://mp.toutiao.com/*"],
+      "js": ["src/content/toutiao.ts"],
+      "run_at": "document_end"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": [
+        "src/lib/reader/reader.js",
+        "src/lib/reader/Readability.js",
+        "src/content/extractor.ts"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*", "src/editor/index.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "zhihu_rules",
+        "enabled": true,
+        "path": "rules/zhihu.json"
+      },
+      {
+        "id": "juejin_rules",
+        "enabled": true,
+        "path": "rules/juejin.json"
+      },
+      {
+        "id": "toutiao_rules",
+        "enabled": true,
+        "path": "rules/toutiao.json"
+      },
+      {
+        "id": "weibo_rules",
+        "enabled": true,
+        "path": "rules/weibo.json"
+      },
+      {
+        "id": "bilibili_rules",
+        "enabled": true,
+        "path": "rules/bilibili.json"
+      },
+      {
+        "id": "baijiahao_rules",
+        "enabled": true,
+        "path": "rules/baijiahao.json"
+      },
+      {
+        "id": "csdn_rules",
+        "enabled": true,
+        "path": "rules/csdn.json"
+      },
+      {
+        "id": "yuque_rules",
+        "enabled": true,
+        "path": "rules/yuque.json"
+      },
+      {
+        "id": "douban_rules",
+        "enabled": true,
+        "path": "rules/douban.json"
+      },
+      {
+        "id": "sohu_rules",
+        "enabled": true,
+        "path": "rules/sohu.json"
+      },
+      {
+        "id": "xueqiu_rules",
+        "enabled": true,
+        "path": "rules/xueqiu.json"
+      },
+      {
+        "id": "weixin_rules",
+        "enabled": true,
+        "path": "rules/weixin.json"
+      },
+      {
+        "id": "woshipm_rules",
+        "enabled": true,
+        "path": "rules/woshipm.json"
+      }
+    ]
+  }
+}

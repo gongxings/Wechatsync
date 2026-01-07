@@ -1,14 +1,32 @@
-.idea/
-node_modules/
-build/
-md/
-build/devtool/
-.DS_Store
-WechatSync.zip
-*.iml
-yarn-error.log
+node_modules
 dist
-zip
-package-json.lock
-package-lock.json
+.turbo
+*.log
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+coverage
+*.zip
 
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.iml
+
+# TypeScript compiled files
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.d.ts.map
+*.tsbuildinfo
+
+# Keep reader library files
+!packages/extension/src/lib/reader/reader.js
+!packages/extension/src/lib/reader/Readability.js
+
+# Lock files (use pnpm)
+package-lock.json
+yarn-error.log

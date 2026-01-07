@@ -1,0 +1,27 @@
+{
+  "name": "@wechatsync/mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for WechatSync - bridges Claude Code with Chrome Extension",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "wechatsync-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsup": "^8.5.1",
+    "typescript": "^5.7.2"
+  }
+}

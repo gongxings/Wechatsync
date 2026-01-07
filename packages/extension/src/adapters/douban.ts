@@ -1,0 +1,255 @@
+/**
+ * 豆瓣适配器
+ */
+import { CodeAdapter, type ImageUploadResult, htmlToMarkdown, markdownToDraft, markdownToHtml, type DoubanImageData } from '@wechatsync/core'
+import type { Article, AuthResult, SyncResult, PlatformMeta } from '@wechatsync/core'
+import type { PublishOptions } from '@wechatsync/core'
+import { createLogger } from '../lib/logger'
+
+const logger = createLogger('Douban')
+
+interface DoubanFormData {
+  note_id: string
+  ck: string
+}
+
+interface DoubanPostParams {
+  siteCookie: {
+    value: string
+  }
+}
+
+export class DoubanAdapter extends CodeAdapter {
+  readonly meta: PlatformMeta = {
+    id: 'douban',
+    name: '豆瓣',
+    icon: 'https://img3.doubanio.com/favicon.ico',
+    homepage: 'https://www.douban.com/note/create',
+    capabilities: ['article', 'draft', 'image_upload'],
+  }
+
+  private username: string = ''
+  private avatar: string = ''
+  private formData: DoubanFormData | null = null
+  private postParams: DoubanPostParams | null = null
+
+  async checkAuth(): Promise<AuthResult> {
+    try {
+      const response = await this.runtime.fetch(
+        'https://www.douban.com/note/create',
+        {
+          method: 'GET',
+          credentials: 'include',
+        }
+      )
+
+      const html = await response.text()
+
+      // 解析页面中的 JavaScript 变量
+      const userNameMatch = html.match(/_USER_NAME\s*=\s*['"]([^'"]+)['"]/)
+      const userAvatarMatch = html.match(/_USER_AVATAR\s*=\s*['"]([^'"]+)['"]/)
+      const noteIdMatch = html.match(/name="note_id"\s+value="(\d+)"/)
+      const ckMatch = html.match(/name="ck"\s+value="([^"]+)"/)
+
+      // 解析 _POST_PARAMS
+      const postParamsMatch = html.match(/_POST_PARAMS\s*=\s*(\{[\s\S]*?\});/)
+
+      if (!userNameMatch || !noteIdMatch || !ckMatch) {
+        return { isAuthenticated: false }
+      }
+
+      this.username = userNameMatch[1]
+      this.avatar = userAvatarMatch ? userAvatarMatch[1] : ''
+      this.formData = {
+        note_id: noteIdMatch[1],
+        ck: ckMatch[1],
+      }
+
+      // 解析 _POST_PARAMS 获取 upload_auth_token
+      if (postParamsMatch) {
+        try {
+          // 简化解析，只提取 siteCookie.value
+          const siteCookieMatch = postParamsMatch[1].match(/siteCookie[^}]*value\s*:\s*['"]([^'"]+)['"]/)
+          if (siteCookieMatch) {
+            this.postParams = {
+              siteCookie: { value: siteCookieMatch[1] }
+            }
+          }
+        } catch (e) {
+          logger.warn('Failed to parse _POST_PARAMS:', e)
+        }
+      }
+
+      logger.debug('Auth info:', {
+        username: this.username,
+        noteId: this.formData.note_id,
+        hasPostParams: !!this.postParams,
+      })
+
+      return {
+        isAuthenticated: true,
+        userId: this.username,
+        username: this.username,
+        avatar: this.avatar,
+      }
+    } catch (error) {
+      logger.error('checkAuth error:', error)
+      return { isAuthenticated: false, error: (error as Error).message }
+    }
+  }
+
+  async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
+    try {
+      logger.info('Starting publish...')
+
+      // 1. 确保已登录
+      if (!this.formData) {
+        const auth = await this.checkAuth()
+        if (!auth.isAuthenticated) {
+          throw new Error('请先登录豆瓣')
+        }
+      }
+
+      // 2. 获取 HTML 内容
+      const rawHtml = article.html || markdownToHtml(article.markdown)
+
+      // 3. 清理内容
+      let content = this.cleanHtml(rawHtml, {
+        removeIframes: true,
+        removeSvgImages: true,
+        removeTags: ['qqmusic'],
+        removeAttrs: ['data-reader-unique-id'],
+      })
+
+      // 3. 处理图片 - 收集完整图片数据
+      const imageDataMap = new Map<string, DoubanImageData>()
+      content = await this.processImages(
+        content,
+        async (src) => {
+          const result = await this.uploadImageWithFullData(src)
+          // 保存完整图片数据，用 newUrl 作为 key
+          imageDataMap.set(result.url, result.imageData)
+          return result
+        },
+        {
+          skipPatterns: ['doubanio.com', 'douban.com'],
+          onProgress: options?.onImageProgress,
+        }
+      )
+
+      // 4. HTML 转 Markdown
+      const markdown = htmlToMarkdown(content)
+
+      // 5. Markdown 转 Draft.js 格式 (传入图片数据)
+      const draftContent = markdownToDraft(markdown, imageDataMap)
+
+      // 6. 保存草稿
+      const response = await this.runtime.fetch(
+        'https://www.douban.com/j/note/autosave',
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            is_rich: '1',
+            note_id: this.formData!.note_id,
+            note_title: article.title,
+            note_text: draftContent,
+            introduction: '',
+            note_privacy: 'P',
+            cannot_reply: '',
+            author_tags: '',
+            accept_donation: '',
+            donation_notice: '',
+            is_original: '',
+            ck: this.formData!.ck,
+          }),
+        }
+      )
+
+      const res = await response.json() as { url?: string; r?: number }
+      logger.debug('Save response:', res)
+
+      // 豆瓣草稿只能在 /note/create 页面查看
+      const draftUrl = 'https://www.douban.com/note/create'
+
+      return this.createResult(true, {
+        postId: this.formData!.note_id,
+        postUrl: draftUrl,
+        draftOnly: options?.draftOnly ?? true,
+      })
+    } catch (error) {
+      return this.createResult(false, {
+        error: (error as Error).message,
+      })
+    }
+  }
+
+  /**
+   * 上传图片并返回完整数据
+   */
+  private async uploadImageWithFullData(src: string): Promise<ImageUploadResult & { imageData: DoubanImageData }> {
+    if (!this.formData || !this.postParams) {
+      throw new Error('未获取上传凭证')
+    }
+
+    // 1. 下载图片
+    const imageResponse = await fetch(src)
+    if (!imageResponse.ok) {
+      throw new Error('图片下载失败: ' + src)
+    }
+    const imageBlob = await imageResponse.blob()
+
+    // 2. 上传到豆瓣
+    const formData = new FormData()
+    formData.append('note_id', this.formData.note_id)
+    formData.append('image_file', imageBlob, 'image.jpg')
+    formData.append('ck', this.formData.ck)
+    formData.append('upload_auth_token', this.postParams.siteCookie.value)
+
+    const uploadResponse = await this.runtime.fetch(
+      'https://www.douban.com/j/note/add_photo',
+      {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      }
+    )
+
+    const res = await uploadResponse.json() as {
+      photo?: {
+        id: string
+        url: string
+        thumb: string
+        width: number
+        height: number
+        file_name: string
+        file_size: number
+      }
+    }
+
+    logger.debug('Image upload response:', res)
+
+    if (!res.photo?.url) {
+      throw new Error('图片上传失败')
+    }
+
+    const photo = res.photo
+
+    // 返回带完整图片数据
+    return {
+      url: photo.url,
+      imageData: {
+        id: photo.id,
+        url: photo.url,
+        thumb: photo.thumb,
+        width: photo.width,
+        height: photo.height,
+        file_name: photo.file_name,
+        file_size: photo.file_size,
+      }
+    }
+  }
+}

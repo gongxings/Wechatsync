@@ -1,0 +1,395 @@
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { X, Check, Loader2, ExternalLink } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { createLogger } from '../lib/logger'
+
+const logger = createLogger('Editor')
+
+interface Article {
+  title: string
+  content: string
+  cover?: string
+  url?: string
+}
+
+interface Platform {
+  id: string
+  name: string
+  icon: string
+  isAuthenticated: boolean
+  username?: string
+}
+
+interface SyncResult {
+  platform: string
+  platformName?: string
+  success: boolean
+  postUrl?: string
+  error?: string
+}
+
+type SyncStatus = 'idle' | 'syncing' | 'completed'
+
+// Storage key for selected platforms (same as popup)
+const SELECTED_PLATFORMS_KEY = 'selectedPlatforms'
+
+// 保存选中的平台到 storage
+function saveSelectedPlatforms(platformIds: string[]) {
+  chrome.storage.local.set({ [SELECTED_PLATFORMS_KEY]: platformIds }).catch((e) => {
+    logger.error('Failed to save selected platforms:', e)
+  })
+}
+
+export function EditorApp() {
+  const [article, setArticle] = useState<Article | null>(null)
+  const [platforms, setPlatforms] = useState<Platform[]>([])
+  const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(new Set())
+  const [status, setStatus] = useState<SyncStatus>('idle')
+  const [results, setResults] = useState<SyncResult[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  // 接收来自父窗口的消息
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      try {
+        const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data
+        logger.debug('Received message:', data)
+
+        if (data.type === 'ARTICLE_DATA') {
+          setArticle(data.article)
+          // 设置初始内容
+          if (contentRef.current && data.article.content) {
+            contentRef.current.innerHTML = data.article.content
+          }
+        } else if (data.type === 'PLATFORMS_DATA') {
+          setPlatforms(data.platforms)
+          // 使用传递的已选中平台，如果没有则默认选中所有已登录平台
+          let selected: string[]
+          if (data.selectedPlatformIds && data.selectedPlatformIds.length > 0) {
+            selected = data.selectedPlatformIds
+          } else {
+            const authenticated = data.platforms.filter((p: Platform) => p.isAuthenticated)
+            selected = authenticated.map((p: Platform) => p.id)
+          }
+          setSelectedPlatforms(new Set(selected))
+          // 保存到 storage，确保与 popup 同步
+          saveSelectedPlatforms(selected)
+        } else if (data.type === 'SYNC_PROGRESS') {
+          setResults(prev => [...prev, data.result])
+        } else if (data.type === 'SYNC_COMPLETE') {
+          setStatus('completed')
+        } else if (data.type === 'SYNC_ERROR') {
+          setError(data.error)
+          setStatus('idle')
+        }
+      } catch (e) {
+        logger.error('Failed to parse message:', e)
+      }
+    }
+
+    window.addEventListener('message', handleMessage)
+
+    // 通知父窗口已准备好
+    window.parent.postMessage(JSON.stringify({ type: 'EDITOR_READY' }), '*')
+
+    return () => window.removeEventListener('message', handleMessage)
+  }, [])
+
+  // 关闭编辑器
+  const handleClose = useCallback(() => {
+    window.parent.postMessage(JSON.stringify({ type: 'CLOSE_EDITOR' }), '*')
+  }, [])
+
+  // 切换平台选中状态
+  const togglePlatform = (id: string) => {
+    setSelectedPlatforms(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      // 保存到 storage，与 popup 同步
+      saveSelectedPlatforms(Array.from(next))
+      return next
+    })
+  }
+
+  // 开始同步
+  const handleSync = () => {
+    if (!article || selectedPlatforms.size === 0) return
+
+    // 获取编辑后的内容
+    const editedArticle = {
+      ...article,
+      title: titleRef.current?.innerText || article.title,
+      content: contentRef.current?.innerHTML || article.content,
+    }
+
+    setStatus('syncing')
+    setResults([])
+    setError(null)
+
+    // 发送同步请求到父窗口
+    window.parent.postMessage(JSON.stringify({
+      type: 'START_SYNC',
+      article: editedArticle,
+      platforms: Array.from(selectedPlatforms),
+    }), '*')
+  }
+
+  // 重试失败项
+  const handleRetry = () => {
+    const failedPlatforms = results.filter(r => !r.success).map(r => r.platform)
+    if (failedPlatforms.length === 0) return
+
+    const editedArticle = {
+      ...article!,
+      title: titleRef.current?.innerText || article!.title,
+      content: contentRef.current?.innerHTML || article!.content,
+    }
+
+    setStatus('syncing')
+    setResults(prev => prev.filter(r => r.success))
+
+    window.parent.postMessage(JSON.stringify({
+      type: 'START_SYNC',
+      article: editedArticle,
+      platforms: failedPlatforms,
+    }), '*')
+  }
+
+  const authenticatedPlatforms = platforms.filter(p => p.isAuthenticated)
+  const successCount = results.filter(r => r.success).length
+  const failedCount = results.filter(r => !r.success).length
+
+  if (!article) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <Loader2 className="w-8 h-8 animate-spin text-gray-400 mx-auto" />
+          <p className="mt-2 text-gray-500">加载文章中...</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* 顶部工具栏 */}
+      <header className="fixed top-0 left-0 right-0 bg-white border-b shadow-sm z-50">
+        <div className="px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <img src={chrome.runtime.getURL('assets/icon-48.png')} alt="Logo" className="w-6 h-6" />
+            <span className="font-medium text-gray-700">同步助手 - 编辑模式</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {status === 'idle' && (
+              <button
+                onClick={handleSync}
+                disabled={selectedPlatforms.size === 0}
+                className={cn(
+                  'px-4 py-2 rounded-lg font-medium transition-colors',
+                  selectedPlatforms.size > 0
+                    ? 'bg-blue-500 text-white hover:bg-blue-600'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                )}
+              >
+                同步到 {selectedPlatforms.size} 个平台
+              </button>
+            )}
+
+            {status === 'syncing' && (
+              <div className="flex items-center gap-2">
+                <span className="px-4 py-2 rounded-lg bg-blue-400 text-white flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  同步中 {results.length}/{selectedPlatforms.size}
+                </span>
+                <button
+                  onClick={() => {
+                    setStatus('idle')
+                    setResults([])
+                    setError(null)
+                  }}
+                  className="px-3 py-2 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors text-sm"
+                >
+                  取消
+                </button>
+              </div>
+            )}
+
+            {status === 'completed' && (
+              <div className="flex items-center gap-2">
+                {failedCount > 0 && (
+                  <button
+                    onClick={handleRetry}
+                    className="px-4 py-2 rounded-lg bg-orange-500 text-white hover:bg-orange-600"
+                  >
+                    重试失败 ({failedCount})
+                  </button>
+                )}
+                <span className="text-sm text-gray-500">
+                  {successCount} 成功 / {failedCount} 失败
+                </span>
+              </div>
+            )}
+
+            <button
+              onClick={handleClose}
+              className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
+              title="关闭"
+            >
+              <X className="w-5 h-5 text-gray-500" />
+            </button>
+          </div>
+        </div>
+
+        {/* 平台选择栏 */}
+        <div className="px-6 py-2 border-t bg-gray-50 flex items-center gap-2 overflow-x-auto">
+          <span className="text-sm text-gray-500 flex-shrink-0">选择平台:</span>
+          {authenticatedPlatforms.map(platform => {
+            const isSelected = selectedPlatforms.has(platform.id)
+            const result = results.find(r => r.platform === platform.id)
+
+            return (
+              <button
+                key={platform.id}
+                onClick={() => togglePlatform(platform.id)}
+                disabled={status === 'syncing'}
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm transition-all flex-shrink-0',
+                  isSelected
+                    ? 'bg-blue-100 text-blue-700 border-2 border-blue-300'
+                    : 'bg-white text-gray-600 border border-gray-200 hover:border-gray-300',
+                  status === 'syncing' && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                <img src={platform.icon} alt="" className="w-4 h-4 rounded" />
+                <span>{platform.name}</span>
+                {result && (
+                  result.success ? (
+                    <Check className="w-3 h-3 text-green-500" />
+                  ) : (
+                    <X className="w-3 h-3 text-red-500" />
+                  )
+                )}
+              </button>
+            )
+          })}
+        </div>
+      </header>
+
+      {/* 文章内容区 */}
+      <main className="pt-28 pb-16">
+        <article className="w-full max-w-4xl mx-auto bg-white shadow-sm px-12 py-10" style={{ minHeight: 'calc(100vh - 7rem)' }}>
+          {/* 封面图 */}
+          {article.cover && (
+            <img
+              src={article.cover}
+              alt=""
+              className="w-full max-h-80 object-cover mb-8"
+            />
+          )}
+
+          {/* 标题 - 可编辑 */}
+          <h1
+            ref={titleRef}
+            contentEditable
+            suppressContentEditableWarning
+            className="text-3xl font-bold text-gray-900 mb-8 outline-none focus:bg-blue-50 rounded px-2 -mx-2 leading-tight"
+          >
+            {article.title}
+          </h1>
+
+          {/* 内容 - 可编辑 */}
+          <div
+            ref={contentRef}
+            contentEditable
+            suppressContentEditableWarning
+            className="outline-none focus:bg-blue-50/50 rounded article-content"
+            style={{
+              fontSize: '16px',
+              lineHeight: '1.8',
+              color: '#333',
+            }}
+            dangerouslySetInnerHTML={{ __html: article.content }}
+          />
+          <style>{`
+            .article-content p { margin-bottom: 1em; }
+            .article-content h1 { font-size: 2em; font-weight: bold; margin: 1em 0 0.5em; }
+            .article-content h2 { font-size: 1.5em; font-weight: bold; margin: 1em 0 0.5em; }
+            .article-content h3 { font-size: 1.25em; font-weight: 600; margin: 0.8em 0 0.4em; }
+            .article-content img { max-width: 100%; height: auto; margin: 1em 0; display: block; }
+            .article-content pre { background: #f5f5f5; padding: 1em; border-radius: 6px; overflow-x: auto; margin: 1em 0; font-size: 14px; }
+            .article-content code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+            .article-content pre code { background: none; padding: 0; }
+            .article-content blockquote { border-left: 4px solid #ddd; padding-left: 1em; margin: 1em 0; color: #666; font-style: italic; }
+            .article-content ul { list-style: disc; padding-left: 2em; margin: 1em 0; }
+            .article-content ol { list-style: decimal; padding-left: 2em; margin: 1em 0; }
+            .article-content li { margin-bottom: 0.5em; }
+            .article-content a { color: #2563eb; text-decoration: underline; }
+            .article-content table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+            .article-content th, .article-content td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+            .article-content th { background: #f5f5f5; font-weight: 600; }
+            .article-content hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }
+            .article-content strong { font-weight: 600; }
+            .article-content em { font-style: italic; }
+          `}</style>
+        </article>
+      </main>
+
+      {/* 同步结果浮窗 */}
+      {results.length > 0 && (
+        <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-lg border p-4 w-80 max-h-80 overflow-y-auto z-50">
+          <h3 className="font-medium text-gray-900 mb-3">同步结果</h3>
+          <div className="space-y-2">
+            {results.map(r => (
+              <div key={r.platform} className="flex items-center justify-between text-sm">
+                <span className="flex items-center gap-2">
+                  {r.success ? (
+                    <Check className="w-4 h-4 text-green-500" />
+                  ) : (
+                    <X className="w-4 h-4 text-red-500" />
+                  )}
+                  {r.platformName || r.platform}
+                </span>
+                {r.success && r.postUrl && (
+                  <a
+                    href={r.postUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-500 hover:underline flex items-center gap-1"
+                  >
+                    查看 <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+                {!r.success && r.error && (
+                  <span className="text-red-500 truncate max-w-[120px]" title={r.error}>
+                    {r.error}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 错误提示 */}
+      {error && (
+        <div className="fixed bottom-4 left-4 bg-red-50 border border-red-200 rounded-lg p-4 max-w-sm z-50">
+          <p className="text-red-700 text-sm">{error}</p>
+          <button
+            onClick={() => setError(null)}
+            className="mt-2 text-red-500 hover:underline text-sm"
+          >
+            关闭
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
